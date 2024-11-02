@@ -5,11 +5,11 @@ import {LogseqProxy} from "../logseq/LogseqProxy";
 
 export class NoteUtils {
     public static async matchTagNamesWithTagIds(
-        tagIds: Number[],
-        tagNames: String[],
-    ): Promise<String[]> {
+        tagIds: number[],
+        tagNames: string[],
+    ): Promise<string[]> {
         const tagIdsSet = new Set(tagIds);
-        const result = [];
+        const result: string[] = [];
         for (let tagName of tagNames) {
             let tagPage;
             tagPage = await LogseqProxy.Editor.getPage(tagName);

@@ -5,23 +5,32 @@ import {convertToHTMLFile, HTMLFile} from "../logseq/LogseqToHtmlConverter";
 import {escapeClozesAndMacroDelimiters, safeReplace} from "../utils/utils";
 import {ANKI_CLOZE_REGEXP, MD_PROPERTIES_REGEXP} from "../constants";
 import {LogseqProxy} from "../logseq/LogseqProxy";
-import {BlockUUID} from "@logseq/libs/dist/LSPlugin.user";
+import type {BlockEntity, BlockUUID} from "@logseq/libs/dist/LSPlugin.user";
 import {DependencyEntity} from "../logseq/getLogseqContentDirectDependencies";
 import getUUIDFromBlock from "../logseq/getUUIDFromBlock";
 import {NoteUtils} from "./NoteUtils";
 
+type ExtendedBlockEntity = BlockEntity & {
+    tagsFromParentCardGroup?: string[];
+    parent?: {
+        id: number;
+    };
+    refs?: Array<{id: number}>;
+    children?: ExtendedBlockEntity[];
+};
+
 export class MultilineCardNote extends Note {
     public type = "multiline_card";
-    public children: any[];
-    public tags: any[];
+    public children: ExtendedBlockEntity[];
+    public tags: string[];
     public constructor(
         uuid: string,
         content: string,
         format: string,
-        properties: any,
+        properties: Record<string, any>,
         page: any,
-        tags: any = [],
-        children: any = [],
+        tags: string[] = [],
+        children: ExtendedBlockEntity[] = [],
         tagIds: number[] = [],
     ) {
         super(uuid, content, format, properties, page, tagIds);
@@ -30,27 +39,54 @@ export class MultilineCardNote extends Note {
     }
 
     public static initLogseqOperations = () => {
-        // Init logseq operations at start of the program
+        // Basic card templates
         logseq.Editor.registerSlashCommand("Card (Forward)", [
-            ["editor/input", `#card #forward`],
+            ["editor/input", `#card #forward\nanki-model:: Basic\nanki-field-Front:: content\nanki-field-Back:: children`],
             ["editor/clear-current-slash"],
         ]);
         logseq.Editor.registerSlashCommand("Card (Reversed)", [
-            ["editor/input", `#card #reversed`],
+            ["editor/input", `#card #reversed\nanki-model:: Basic (and reversed card)\nanki-field-Front:: content\nanki-field-Back:: children`],
             ["editor/clear-current-slash"],
         ]);
         logseq.Editor.registerSlashCommand("Card (Bidirectional)", [
-            ["editor/input", `#card #bidirectional`],
+            ["editor/input", `#card #bidirectional\nanki-model:: Basic (and reversed card)\nanki-field-Front:: content\nanki-field-Back:: children`],
             ["editor/clear-current-slash"],
         ]);
         logseq.Editor.registerSlashCommand("Card (Incremental)", [
-            ["editor/input", `#card #incremental`],
+            ["editor/input", `#card #incremental\nanki-model:: Cloze\nanki-field-Text:: content`],
             ["editor/clear-current-slash"],
         ]);
-        logseq.Editor.registerSlashCommand("Card (Incremental + Hide all, Test one)", [
-            ["editor/input", `#card #incremental #hide-all-test-one`],
+
+        // Custom card templates
+        logseq.Editor.registerSlashCommand("Card (Guitar Chord)", [
+            ["editor/input", `#card
+anki-model:: Guitar Chord
+anki-field-Front:: content
+anki-field-Chord:: chord-data
+anki-field-ChordOptions:: chord-options
+chord-data:: {"name":"","chord":[],"position":0,"barres":[]}
+chord-options:: {"defaultColor":"#222","width":180,"height":210,"showTuning":true}`],
             ["editor/clear-current-slash"],
         ]);
+        logseq.Editor.registerSlashCommand("Card (Code)", [
+            ["editor/input", `#card
+anki-model:: Code
+anki-field-Front:: content
+anki-field-Code:: code
+anki-field-Language:: language
+language:: javascript`],
+            ["editor/clear-current-slash"],
+        ]);
+        logseq.Editor.registerSlashCommand("Card (Math)", [
+            ["editor/input", `#card
+anki-model:: Math
+anki-field-Front:: content
+anki-field-Math:: math
+anki-field-Steps:: steps`],
+            ["editor/clear-current-slash"],
+        ]);
+
+        // Style for page references
         logseq.provideStyle(`
             .page-reference[data-ref=flashcard], a[data-ref=flashcard] {
                 opacity: .3;
@@ -73,32 +109,30 @@ export class MultilineCardNote extends Note {
             .page-reference[data-ref=card-group], a[data-ref=card-group] {
                 opacity: .3;
             }
-            .page-reference[data-ref=hide-all-test-one], a[data-ref=hide-all-test-one] {
-                opacity: .3;
-            }
         `);
+
+        // Create required pages
         LogseqProxy.Editor.createPageSilentlyIfNotExists("card-group");
         LogseqProxy.Editor.createPageSilentlyIfNotExists("flashcard");
         LogseqProxy.Editor.createPageSilentlyIfNotExists("forward");
         LogseqProxy.Editor.createPageSilentlyIfNotExists("reversed");
         LogseqProxy.Editor.createPageSilentlyIfNotExists("bidirectional");
         LogseqProxy.Editor.createPageSilentlyIfNotExists("incremental");
-        LogseqProxy.Editor.createPageSilentlyIfNotExists("hide-all-test-one");
         for (let i = 1; i <= 9; i++) {
             LogseqProxy.Editor.createPageSilentlyIfNotExists(`depth-${i}`);
         }
     };
 
     private getCardDirection(): string {
-        let direction = _.get(this, "properties.direction");
-        if (direction != "->" && direction != "<-" && direction != "<->") {
+        const direction = _.get(this, "properties.direction") as string;
+        if (direction !== "->" && direction !== "<-" && direction !== "<->") {
             if (
                 (this.tags.includes("reversed") && this.tags.includes("forward")) ||
                 this.tags.includes("bidirectional")
             )
-                direction = "<->";
-            else if (this.tags.includes("reversed")) direction = "<-";
-            else direction = "->";
+                return "<->";
+            else if (this.tags.includes("reversed")) return "<-";
+            else return "->";
         }
         return direction;
     }
@@ -114,41 +148,44 @@ export class MultilineCardNote extends Note {
         return maxDepth;
     }
 
-    private static async getRelevantTags(tagIds: any[]): Promise<string[]> {
-        return await NoteUtils.matchTagNamesWithTagIds(tagIds, [
+    private static async getRelevantTags(tagIds: number[]): Promise<string[]> {
+        const tags = await NoteUtils.matchTagNamesWithTagIds(tagIds, [
             "forward",
             "reversed",
             "bidirectional",
             "incremental",
-            ...Array.from(Array(10).keys()).map((i) => `depth-${i}`),
+            ...Array.from({length: 10}, (_, i) => `depth-${i}`),
         ]);
+        // Convert String[] to string[]
+        return tags.map(tag => String(tag));
     }
 
-    public async getClozedContentHTML(): Promise<HTMLFile> {
-        let clozedContent = "";
-        const clozedContentAssets: Set<string> = new Set();
-        const direction = this.getCardDirection();
+    private async getFieldContent(fieldMapping: string): Promise<string> {
+        // Handle special field mappings
+        switch (fieldMapping) {
+            case 'content':
+                const contentHtml = await convertToHTMLFile(this.content, this.format);
+                return contentHtml.html;
+            case 'children':
+                const childrenHtml = await this.getChildrenContent();
+                return childrenHtml;
+            default:
+                // Check if it's a property value
+                if (this.properties[fieldMapping]) {
+                    return this.properties[fieldMapping].toString();
+                }
+                return '';
+        }
+    }
 
-        // Remove clozes and double braces one after another.
-        this.content = escapeClozesAndMacroDelimiters(this.content);
-
-        // Render the parent block and add to clozedContent
-        const parentBlockHTMLFile = await convertToHTMLFile(this.content, this.format);
-        parentBlockHTMLFile.assets.forEach((asset) => clozedContentAssets.add(asset));
-        if (direction == "<->" || direction == "<-")
-            // Insert cloze braces depending upon direction else simply add parent block html to clozedContent
-            clozedContent = `{{c2::${parentBlockHTMLFile.html}}}`;
-        else clozedContent = parentBlockHTMLFile.html;
-
-        // Add the content of children blocks and cloze it if direction is <-> or ->
-        let cloze_id = 1;
+    private async getChildrenContent(): Promise<string> {
         const maxDepth = this.getChildrenMaxDepth();
-        const getChildrenListHTMLFile = async (
-            childrenList: any,
+        
+        const getChildrenListHTML = async (
+            childrenList: ExtendedBlockEntity[],
             level = 0,
-        ): Promise<HTMLFile> => {
-            if (level >= maxDepth) return {html: "", assets: new Set<string>(), tags: []};
-            const childrenListAssets = new Set<string>();
+        ): Promise<string> => {
+            if (level >= maxDepth) return "";
             let childrenListHTML = `\n<ul class="children-list left-border">`;
             for (const child of childrenList) {
                 childrenListHTML += `\n<li class="children ${_.get(child, "properties['logseq.orderListType']") == "number" ? 'numbered' : ''}">`;
@@ -163,44 +200,68 @@ export class MultilineCardNote extends Note {
                     child.format,
                 );
                 let sanitizedChildHTML = sanitizedChildHTMLFile.html;
-                const sanitizedChildAssets = sanitizedChildHTMLFile.assets;
-                sanitizedChildAssets.forEach((asset) => childrenListAssets.add(asset));
-                if (child.children.length > 0) {
-                    const allChildrenHTMLFile = await getChildrenListHTMLFile(
-                        child.children,
-                        level + 1,
-                    );
-                    sanitizedChildHTML += allChildrenHTMLFile.html;
-                    allChildrenHTMLFile.assets.forEach((asset) =>
-                        childrenListAssets.add(asset),
-                    );
+                
+                if (child.children?.length > 0) {
+                    sanitizedChildHTML += await getChildrenListHTML(child.children, level + 1);
                 }
-
-                if (level == 0 && (direction == "<->" || direction == "->")) {
-                    childrenListHTML += `{{c${cloze_id}:: ${sanitizedChildHTML} }}`;
-                    if (this.tags.includes("incremental")) cloze_id++;
-                    if (cloze_id == 2) cloze_id++;
-                } else childrenListHTML += sanitizedChildHTML;
+                childrenListHTML += sanitizedChildHTML;
                 childrenListHTML += `</li>`;
             }
             childrenListHTML += `</ul>`;
-            return {
-                html: childrenListHTML,
-                assets: childrenListAssets,
-                tags: [],
-            };
+            return childrenListHTML;
         };
-        const childrenHTMLFile = await getChildrenListHTMLFile(this.children);
-        childrenHTMLFile.assets.forEach((asset) => clozedContentAssets.add(asset));
-        clozedContent += childrenHTMLFile.html;
 
-        if (this.children.length == 0 && (direction == "<->" || direction == "->"))
-            clozedContent += `{{c${cloze_id}::}}`; // #16
+        return await getChildrenListHTML(this.children);
+    }
+
+    public async getClozedContentHTML(): Promise<HTMLFile> {
+        const assets = new Set<string>();
+        const tags: string[] = [];
+
+        // Get field content based on mappings
+        const fieldContent: Record<string, string> = {};
+        for (const [key, value] of Object.entries(this.properties)) {
+            if (key.startsWith("anki-field-")) {
+                const fieldName = key.replace("anki-field-", "");
+                const mapping = value as string;
+                fieldContent[fieldName] = await this.getFieldContent(mapping);
+            }
+        }
+
+        // Get main content
+        let mainContent: string;
+        const direction = this.getCardDirection();
+        if (direction === "<-" || direction === "<->") {
+            // For reversed cards, swap content and children
+            mainContent = await this.getFieldContent("children");
+        } else {
+            mainContent = await this.getFieldContent("content");
+        }
+
+        // If no fields specified, use defaults based on model type
+        const ankiModel = this.properties["anki-model"] || "Basic";
+        if (Object.keys(fieldContent).length === 0) {
+            if (ankiModel.toLowerCase().includes("cloze")) {
+                fieldContent["Text"] = mainContent;
+            } else {
+                fieldContent["Front"] = mainContent;
+                fieldContent["Back"] = await this.getFieldContent("children");
+            }
+        }
+
+        // Store custom field data in hidden divs
+        const html = `
+            <div class="anki-custom-data" style="display:none">
+                <div class="anki-model">${ankiModel}</div>
+                <div class="anki-fields">${JSON.stringify(fieldContent)}</div>
+            </div>
+            ${mainContent}
+        `;
 
         return {
-            html: clozedContent,
-            assets: clozedContentAssets,
-            tags: parentBlockHTMLFile.tags,
+            html,
+            assets,
+            tags
         };
     }
 
@@ -228,13 +289,14 @@ export class MultilineCardNote extends Note {
         ]`);
         logseqCardGroup_blocks = await Promise.all(
             logseqCardGroup_blocks.map(async (block) => {
-                const uuid = getUUIDFromBlock(block[0]);
-                const parent = block[0].parent.id;
-                const parentBlock = await LogseqProxy.Editor.getBlock(parent);
-                const tags = await MultilineCardNote.getRelevantTags(
-                    _.get(parentBlock, "refs", []).map((ref) => ref.id),
-                );
-                block[0].tagsFromParentCardGroup = [...tags];
+                const blockEntity = block[0] as ExtendedBlockEntity;
+                const uuid = getUUIDFromBlock(blockEntity);
+                const parent = blockEntity.parent?.id;
+                const parentBlock = parent ? await LogseqProxy.Editor.getBlock(parent) : null;
+                const tags = parentBlock ? await MultilineCardNote.getRelevantTags(
+                    (parentBlock as ExtendedBlockEntity).refs?.map((ref) => ref.id) || []
+                ) : [];
+                blockEntity.tagsFromParentCardGroup = [...tags];
                 return block;
             }),
         );
@@ -245,28 +307,29 @@ export class MultilineCardNote extends Note {
         ];
         let notes = await Promise.all(
             blocks.map(async (block) => {
-                const uuid = getUUIDFromBlock(block[0]);
-                const page = block[0].page
-                    ? await LogseqProxy.Editor.getPage(block[0].page.id)
+                const blockEntity = block[0] as ExtendedBlockEntity;
+                const uuid = getUUIDFromBlock(blockEntity);
+                const page = blockEntity.page
+                    ? await LogseqProxy.Editor.getPage(blockEntity.page.id)
                     : {};
-                const tagsFromParentCardGroup = _.get(block[0], "tagsFromParentCardGroup", []);
-                block = await LogseqProxy.Editor.getBlock(uuid, {
+                const tagsFromParentCardGroup = blockEntity.tagsFromParentCardGroup || [];
+                const fullBlock = await LogseqProxy.Editor.getBlock(uuid, {
                     includeChildren: true,
-                });
-                if (block) {
+                }) as ExtendedBlockEntity;
+                if (fullBlock) {
                     const tags = await MultilineCardNote.getRelevantTags(
-                        _.get(block, "refs", []).map((ref) => ref.id),
+                        fullBlock.refs?.map((ref) => ref.id) || []
                     );
                     return new MultilineCardNote(
                         uuid,
-                        block.content,
-                        block.format,
-                        block.properties || {},
+                        fullBlock.content,
+                        fullBlock.format,
+                        fullBlock.properties || {},
                         page,
                         // Apply tags in parent card group block - #168
                         tags && tags.length > 0 ? tags : tagsFromParentCardGroup,
-                        block.children,
-                        _.get(block, "refs", []).map((ref) => ref.id),
+                        fullBlock.children || [],
+                        fullBlock.refs?.map((ref) => ref.id) || []
                     );
                 } else {
                     return null;
@@ -290,16 +353,22 @@ export class MultilineCardNote extends Note {
     }
 
     public getBlockDependencies(): DependencyEntity[] {
-        function getChildrenUUID(children: any): BlockUUID[] {
-            let result = [];
+        function getChildrenUUID(children: ExtendedBlockEntity[]): BlockUUID[] {
+            let result: BlockUUID[] = [];
             for (const child of children) {
                 result.push(child.uuid);
-                result = result.concat(getChildrenUUID(child.children));
+                if (child.children?.length > 0) {
+                    result = result.concat(getChildrenUUID(child.children));
+                }
             }
             return result;
         }
         return [this.uuid, ...getChildrenUUID(this.children)].map(
             (block) => ({type: "Block", value: block}) as DependencyEntity,
         );
+    }
+
+    public static async getBlocksFromLogseq(): Promise<ExtendedBlockEntity[]> {
+        return [];
     }
 }
